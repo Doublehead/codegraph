@@ -1,0 +1,3 @@
+class Btn {
+    render() {}
+}

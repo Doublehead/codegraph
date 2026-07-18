@@ -1,0 +1,2 @@
+def inner():
+    pass

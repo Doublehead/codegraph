@@ -1,0 +1,8 @@
+.venv/
+.codegraph/
+__pycache__/
+*.pyc
+*.egg-info/
+.DS_Store
+AUDIT-*.json
+*.corrupt

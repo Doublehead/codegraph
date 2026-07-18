@@ -1,0 +1,27 @@
+[project]
+name = "codegraph"
+version = "1.0.0"
+description = "AST-extracted symbol/call graph for any repo, queryable over MCP"
+requires-python = ">=3.10"
+# Floors are tested versions; upper caps pin the tree-sitter ABI — a 0.x minor bump
+# can break the grammar/core ABI (it has before), so cap each at the next minor.
+dependencies = [
+    "mcp>=1.14,<2",
+    "tree-sitter>=0.25.2,<0.26",
+    "tree-sitter-python>=0.25.0,<0.26",
+    "tree-sitter-javascript>=0.25.0,<0.26",
+    "tree-sitter-typescript>=0.23.2,<0.24",
+    "tree-sitter-php>=0.24.1,<0.25",
+    "tree-sitter-ruby>=0.23.1,<0.24",
+    "tree-sitter-go>=0.25.0,<0.26",
+]
+
+[project.scripts]
+codegraph = "codegraph.server:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["codegraph"]
