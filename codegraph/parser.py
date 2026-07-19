@@ -341,12 +341,68 @@ def parse(source: bytes, lang: str) -> ParsedFile:
     if lang == "ruby":
         _extract_rb_mixins(out, root, source, language)
 
+    # --- PHP string constants (const NS / define) -> resolve constant-namespaced routes ---
+    if lang == "php":
+        _extract_php_consts(out, root, source, language)
+
     # --- React component graph (HOC-wrapped defs + JSX usage as edges) ---
     if lang in ("javascript", "typescript", "tsx"):
         _extract_tsx_components(out, root, source, language, lang)
 
     _attribute(out)
     return out
+
+
+def _hook_expr(node: ts.Node | None, source: bytes) -> str:
+    """A route-part's literal value, else its token / raw expression text so a dynamic
+    route shows itself honestly instead of a bare '?'. A class-constant access
+    (Foo::NS / self::NS) returns its 'Class::NAME' token for later const resolution."""
+    if node is None:
+        return "?"
+    lit = _str_lit(node, source)
+    if lit is not None:
+        return lit
+    return source[node.start_byte:node.end_byte].decode("utf8", "replace").strip()
+
+
+def _extract_php_consts(out: ParsedFile, root: ts.Node, source: bytes, language) -> None:
+    """String-valued PHP class constants (const NS = 'x';) and define()s, recorded as
+    kind='const' assigns keyed by their TOKEN: class consts as 'Class::NAME', globals as
+    'NAME'. resolve() swaps these into hook names that reference them (Foo::NS/scene ->
+    zrougable/v1/scene), cross-file. Only literal values are stored; a computed const
+    (X . '/y') is skipped so nothing is faked. Kept out of type inference (resolve()
+    skips kind='const')."""
+    ctypes = L.CONTAINER_TYPES.get("php", set())
+    q = _compile(language, "(const_element) @el", out.warnings)
+    if q is not None:
+        for el in _captures(q, root).get("el", []):
+            kids = el.named_children
+            if len(kids) < 2 or kids[0].type != "name":
+                continue
+            name = _text(kids[0], source)
+            val = _str_lit(kids[1], source)
+            if not name or val is None:
+                continue  # computed / non-literal const -> not faked
+            cls = _container_of(el, ctypes, source)
+            token = f"{cls}::{name}" if cls else name
+            out.assigns.append(Assign(var=token, cls=val, byte=el.start_byte, kind="const"))
+    qd = _compile(language, "(function_call_expression function: (name) @fn) @call", out.warnings)
+    if qd is not None:
+        for call in _captures(qd, root).get("call", []):
+            fnn = call.child_by_field_name("function")
+            if fnn_txt(fnn, source) != "define":
+                continue
+            args = call.child_by_field_name("arguments")
+            vals = _arg_values(args) if args is not None else []
+            if len(vals) >= 2:
+                name = _str_lit(vals[0], source)
+                val = _str_lit(vals[1], source)
+                if name and val is not None:
+                    out.assigns.append(Assign(var=name, cls=val, byte=call.start_byte, kind="const"))
+
+
+def fnn_txt(node: ts.Node | None, source: bytes) -> str | None:
+    return source[node.start_byte:node.end_byte].decode("utf8", "replace") if node is not None else None
 
 
 def _str_lit(node: ts.Node | None, source: bytes) -> str | None:
@@ -502,8 +558,8 @@ def _extract_hooks(out: ParsedFile, root: ts.Node, source: bytes, language, lang
                                       cb_name=cn, cb_container=cc, cb_recv=recv, cb_raw=raw,
                                       entry_point=entry, unauth=unauth, line=line, byte=byte))
         elif fn in rest and len(vals) >= 3:
-            ns = _str_lit(vals[0], source) or "?"
-            route = _str_lit(vals[1], source) or "?"
+            ns = _hook_expr(vals[0], source)      # literal, else 'Class::NS' token / raw expr
+            route = _hook_expr(vals[1], source)
             hook = f"{ns}{route}"
             cb = perm = None
             for key, val in _array_pairs(vals[2]):

@@ -49,6 +49,8 @@ hooks a callback fires on; hooks(name=<hookname>) lists listeners; hooks(entry_p
 maps the wp_ajax_*/admin_post_*/REST attack surface with UNAUTH flagged. blast_radius \
 also reports a symbol's hook registrations as hook_context.
 
+READING HOOK METRICS (avoid the #1 false "it's broken" conclusion): `edges_hook` counts only SYNTHESIZED fire->listener edges, which exist ONLY when an in-repo do_action/apply_filters meets an in-repo listener. A pure-listener plugin (registers add_action/register_rest_route callbacks that WP CORE or the REST framework fires, never its own do_action) correctly reports `edges_hook: 0` - that is expected, NOT a missing-extractor bug. REST routes are deliberately never joined to fires (the framework fires them), so they never contribute to edges_hook. The captured coupling lives in the HOOKS TABLE, not the edges count: before concluding anything is unextracted, run hooks(entry_points=true) and hooks(name=<a handler>) - the registrations will be right there. edges_hook is the wrong number for "is coupling captured"; the hooks tool is the right check.
+
 SCOPING (do this for the user, proactively): on a big vendor monorepo (WordPress + \
 WooCommerce/Dokan, etc.) the graph drowns in third-party code - hotspots bind to vendor \
 core re-declarations and almost everything is ambiguous. When `index` returns a \
@@ -526,7 +528,13 @@ def hooks(root: str = ".", name: str = "", entry_points: bool = False) -> dict:
       wp_ajax_nopriv_* / register_rest_route callback, with UNAUTH flagged.
 
     Blind spots (honest): dynamic/interpolated hook names, closures, and variable
-    callbacks (call_user_func($x)) cannot be resolved and are not edges."""
+    callbacks (call_user_func($x)) cannot be resolved and are not edges.
+
+    This tool - NOT the `edges_hook` count - is the source of truth for whether
+    WordPress coupling was captured. `edges_hook: 0` is normal for a pure-listener
+    plugin (its callbacks are fired by WP core / the REST framework, not by its own
+    do_action), and REST routes never contribute to that count by design. If a hook
+    seems missing, check here first."""
     store = Store(_ensure(root))
     try:
         if entry_points or not name:

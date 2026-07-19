@@ -1513,6 +1513,40 @@ def test_pending_reports_cross_file_flips():
 
 
 
+def test_wp_const_namespace_routes():
+    """Pre-existing WP bug: register_rest_route(Foo::NS, '/x') rendered as '?/x'
+    because the namespace is a class constant, not a string literal. String consts
+    (const NS = '...') and define()s are now captured and swapped into the route
+    name - cross-file (the const usually lives in another class) and for self::NS.
+    A genuinely dynamic namespace ($ns . '/x') shows its expression, never a bare '?'."""
+    tmp, db = _index_copy("wp_const_routes")
+    try:
+        s2 = Store(db)
+        try:
+            routes = {r["hook"]: r["unauth"] for r in s2.db.execute(
+                "SELECT hook, unauth FROM hooks WHERE hook_class='rest'")}
+        finally:
+            s2.close()
+        assert "zrougable/v1/scene" in routes, ("self::NS must resolve", routes)
+        assert "zrougable/v1/voice-token" in routes, ("cross-file Class::NS must resolve", routes)
+        assert not any(h.startswith("?") for h in routes), ("no bare '?' route", routes)
+        assert not any("::" in h for h in routes), ("no unresolved const token left", routes)
+        dyn = [h for h in routes if "$ns" in h]
+        assert dyn, ("dynamic route must show its expression, not '?'", routes)
+        # pure-listener plugin: edges_hook=0 is expected and the stats note must say so,
+        # so a diagnosing agent doesn't misread it as a broken extractor (the window-12 loop)
+        st = Store(db)
+        try:
+            stats = st.stats()
+        finally:
+            st.close()
+        assert stats["edges_hook"] == 0 and stats["hook_registrations"] >= 3
+        assert "edges_hook_note" in stats and "EXPECTED" in stats["edges_hook_note"]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+
 TESTS = [
     test_ground_truth,
     test_p1_repoint_same_name_diff_container,
@@ -1524,6 +1558,7 @@ TESTS = [
     test_wp_honest_blind_spots,
     test_wp_adversarial_callback_forms,
     test_wp_parse_error_recovery_const_namespace,
+    test_wp_const_namespace_routes,
     test_ns_collision_callback_never_guessed,
     test_recovery_does_not_swallow_top_level_fns,
     test_incremental_pass_reports_edges_hook,

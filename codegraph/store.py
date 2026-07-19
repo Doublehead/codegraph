@@ -13,6 +13,7 @@ in-memory dict pass - cheap even on large repos.
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 from collections import defaultdict
 
@@ -342,6 +343,8 @@ class Store:
                 if cname:
                     mixins[(_fam(a["lang"]), cname)].add(a["cls"])
                 continue
+            if a["kind"] == "const":  # a string const fact for hook-name resolution, not a type
+                continue
             if a["scope_symbol"] is not None:
                 bound_scope.add((a["scope_symbol"], a["var"]))
             else:
@@ -446,6 +449,7 @@ class Store:
         edges (resolution='hook') for in-repo do_action/apply_filters sites. The
         callback->hook direction (stored on each row) is the high-confidence half."""
         self.db.execute("UPDATE hooks SET callback_symbol=NULL")
+        self._resolve_const_hooks()
         # Python precision gate: only treat `.connect`/`.send`/`.delay` as dispatch when the
         # name is EVIDENCED - a Django builtin signal, an in-repo `x = Signal()`, a @receiver
         # target, or a @task name. Without this, a non-signal `sock.connect(fn)`+`sock.send()`
@@ -491,6 +495,45 @@ class Store:
         self.db.executemany(
             "INSERT INTO edges(src,dst,kind,resolution,file,line) VALUES(?,?,?,?,?,?)", edges)
         return len(edges)
+
+    def _resolve_const_hooks(self) -> None:
+        """Swap PHP string-constant tokens into hook names that reference them, so a
+        constant-namespaced route (register_rest_route(Foo::NS, '/scene')) reads
+        'zrougable/v1/scene' instead of a bare token. const_map is global (cross-file
+        by design - the const usually lives in another class file). self::NAME /
+        static::NAME resolve to the class enclosing the hook. A token with no matching
+        const is left AS-IS (the honest expression), never blanked."""
+        const_map = {}      # 'Class::NAME' or 'NAME' -> literal value
+        global_consts = {}  # bare 'NAME' -> value, for whole-word global swaps
+        for a in self.db.execute("SELECT var, cls FROM assigns WHERE kind='const'"):
+            const_map[a["var"]] = a["cls"]
+            if "::" not in a["var"]:
+                global_consts[a["var"]] = a["cls"]
+        if not const_map:
+            return
+        rows = self.db.execute(
+            "SELECT id, hook, enclosing_symbol FROM hooks "
+            "WHERE hook LIKE '%::%' OR hook GLOB '*[A-Z_]*'").fetchall()
+        for r in rows:
+            hook = r["hook"]
+            if not hook:
+                continue
+            container = None
+            if r["enclosing_symbol"] is not None:
+                sym = self.symbol_by_id(r["enclosing_symbol"])
+                container = sym["container"] if sym else None
+
+            def _swap_scoped(m):
+                cls, nm = m.group(1), m.group(2)
+                if cls in ("self", "static") and container:
+                    cls = container
+                return const_map.get(f"{cls}::{nm}", m.group(0))
+
+            new = re.sub(r"(\w+)::(\w+)", _swap_scoped, hook)
+            for name, val in global_consts.items():  # bare define() tokens, whole-word
+                new = re.sub(rf"\b{re.escape(name)}\b", val, new)
+            if new != hook:
+                self.db.execute("UPDATE hooks SET hook=? WHERE id=?", (new, r["id"]))
 
     @staticmethod
     def _resolve_callback(h, free_by, meth_by, meth_by_nc, src_container, assign_scope, assign_file):
@@ -610,7 +653,8 @@ class Store:
             "SELECT kind, COUNT(*) n FROM symbols GROUP BY kind ORDER BY n DESC"
         ).fetchall()
         sc = self._site_counts()  # edges_* are CALL SITES; edge_rows is the fanned-out total
-        return {
+        hook_regs = g("SELECT COUNT(*) FROM hooks WHERE kind='listen'")
+        out = {
             "files": g("SELECT COUNT(*) FROM files"),
             "symbols": g("SELECT COUNT(*) FROM symbols"),
             "edge_rows": sc["edge_rows"],          # total candidate edges (graph size)
@@ -618,7 +662,7 @@ class Store:
             "edges_inferred": sc["edges_inferred"],
             "edges_ambiguous": sc["edges_ambiguous"],
             "edges_hook": sc["edges_hook"],
-            "hook_registrations": g("SELECT COUNT(*) FROM hooks WHERE kind='listen'"),
+            "hook_registrations": hook_regs,
             "entry_points": g("SELECT COUNT(*) FROM hooks WHERE entry_point=1"),
             "unauth_entry_points": g("SELECT COUNT(*) FROM hooks WHERE unauth=1"),
             "unresolved": sc["unresolved"],          # same key as index() for consistency
@@ -626,6 +670,16 @@ class Store:
             "by_language": {r["lang"]: r["n"] for r in langs},
             "by_kind": {r["kind"]: r["n"] for r in kinds},
         }
+        # Pre-empt the #1 false "extractor is broken" conclusion: edges_hook counts only
+        # synthesized in-repo fire->listener edges, so it is legitimately 0 for a
+        # pure-listener plugin. Point a diagnosing agent at the hooks table, not the count.
+        if out["edges_hook"] == 0 and hook_regs > 0:
+            out["edges_hook_note"] = (
+                f"edges_hook=0 is EXPECTED here: {hook_regs} hook registration(s) captured, "
+                f"but no in-repo do_action/apply_filters fires them (WP core / the REST "
+                f"framework does). Coupling IS captured - inspect it with hooks(entry_points=true) "
+                f"or hooks(name=<handler>), not the edges_hook number.")
+        return out
 
 
 
